@@ -1,102 +1,4 @@
-use std::borrow::Cow;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum HeaderType {
-    Keep,
-    Add,
-    Del,
-}
-
-pub struct Header<'a> {
-    ty: HeaderType,
-    name: Cow<'a, [u8]>,
-    value: Cow<'a, [u8]>,
-}
-
-impl<'a> std::fmt::Debug for Header<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Header")
-            .field("type", &self.ty)
-            .field("name", &String::from_utf8_lossy(&self.name))
-            .field("value", &String::from_utf8_lossy(&self.value))
-            .finish()
-    }
-}
-
-pub struct RawRequest<'a> {
-    pub method: &'a [u8],
-    pub uri: &'a [u8],
-    pub version: &'a [u8],
-    pub headers: Vec<Header<'a>>,
-}
-
-impl<'a> RawRequest<'a> {
-    pub fn new() -> Self {
-        RawRequest {
-            method: &[],
-            uri: &[],
-            version: &[],
-            headers: Vec::new(),
-        }
-    }
-
-    pub fn add_header_name(&mut self, name: &'a [u8]) {
-        self.headers.push(Header {
-            ty: HeaderType::Keep,
-            name: Cow::Borrowed(name),
-            value: Cow::Borrowed(&[]),
-        })
-    }
-
-    pub fn add_header_value(&mut self, value: &'a [u8]) {
-        self.headers.last_mut().unwrap().value = Cow::Borrowed(value);
-    }
-
-    pub fn set_header(&mut self, key: &str, value: Vec<u8>) {
-        self.remove_header(key);
-        self.add_header(key, value);
-    }
-
-    pub fn add_header(&mut self, key: &str, value: Vec<u8>) {
-        // add new one
-        self.headers.push(Header {
-            ty: HeaderType::Add,
-            name: Cow::Owned(key.as_bytes().to_vec()),
-            value: Cow::Owned(value.to_vec()),
-        })
-    }
-
-    pub fn remove_header(&mut self, key: &str) {
-        for h in &mut self.headers {
-            if h.ty != HeaderType::Del && &h.name[..] == key.as_bytes() {
-                h.ty = HeaderType::Del;
-            }
-        }
-    }
-
-    pub fn get_header(&self, key: &str) -> Vec<Cow<'a, [u8]>> {
-        self.headers
-            .iter()
-            .filter(|x| x.ty != HeaderType::Del && x.name == key.as_bytes())
-            .map(|h| h.value.clone())
-            .collect()
-    }
-
-    pub fn headers(&self) -> &'a [Header] {
-        &self.headers
-    }
-}
-
-impl<'a> std::fmt::Debug for RawRequest<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawRequest")
-            .field("method", &String::from_utf8_lossy(self.method))
-            .field("uri", &String::from_utf8_lossy(self.uri))
-            .field("version", &String::from_utf8_lossy(self.version))
-            .field("headers", &self.headers)
-            .finish()
-    }
-}
+use crate::http::{Header, RawRequest, RawResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseStatus {
@@ -111,41 +13,32 @@ pub enum ParseError {
     UnsupportMethod,
 }
 
-impl<'a> RawRequest<'a> {
-    pub fn parse(&mut self, buf: &'a [u8]) -> Result<usize, ParseError> {
-        let mut input = buf;
+pub fn parse_request<'a>(buf: &'a [u8], req: &mut RawRequest<'a>) -> Result<usize, ParseError> {
+    let mut input = buf;
 
-        input = skip_first_crlf(input)?;
-
-        input = parse_request_line(input, self)?;
-
-        input = parse_headers(input, &mut self.headers)?;
-
-        Ok(buf.len() - input.len())
+    // skip first empty line (some clients add CRLF after POST content)
+    if input.len() < 2 {
+        return Err(ParseError::Incomplete);
+    }
+    if &input[..2] == b"\r\n" {
+        input = &input[2..];
     }
 
-    pub fn parse2(&mut self, buf: &'a [u8]) -> Result<usize, ParseError> {
-        let mut input = buf;
+    input = parse_request_line(input, req)?;
 
-        input = parse_request_line2(input, self)?;
+    input = parse_headers(input, &mut req.headers)?;
 
-        input = parse_headers2(input, &mut self.headers)?;
-
-        Ok(buf.len() - input.len())
-    }
+    Ok(buf.len() - input.len())
 }
 
-fn parse_request_line2<'a>(
-    buf: &'a [u8],
-    req: &mut RawRequest<'a>,
-) -> Result<&'a [u8], ParseError> {
+fn parse_request_line<'a>(buf: &'a [u8], req: &mut RawRequest<'a>) -> Result<&'a [u8], ParseError> {
     let mut input = buf;
 
     // get method until space
-    let (input, method) = find_and_skip(input, b" ")?;
+    let (input, method) = find_and_skip_byte(input, b' ')?;
     req.method = method;
 
-    let (input, uri) = find_and_skip(input, b" ")?;
+    let (input, uri) = find_and_skip_byte(input, b' ')?;
     req.uri = uri;
 
     // parse version
@@ -171,26 +64,19 @@ fn parse_request_line2<'a>(
     Ok(input)
 }
 
-fn parse_headers2<'a>(
-    buf: &'a [u8],
-    headers: &mut Vec<Header<'a>>,
-) -> Result<&'a [u8], ParseError> {
+fn parse_headers<'a>(buf: &'a [u8], headers: &mut Vec<Header<'a>>) -> Result<&'a [u8], ParseError> {
     let mut input = buf;
 
     loop {
-        let (i, name) = find_and_skip(input, b":")?;
-        let (i, _sp) = take_till(i, |b| b == b':' || b == b' ')?;
-        let (i, value) = find_and_skip(i, b"\r\n")?;
-        // let value = ltrim(value);
-        headers.push(Header {
-            ty: HeaderType::Keep,
-            name: Cow::Borrowed(name),
-            value: Cow::Borrowed(value),
-        });
+        let (i, name) = find_and_skip_byte(input, b':')?;
+        let (i, _sp) = take_till(i, is_ws)?;
+        let (i, value) = find_and_skip_2bytes(i, [b'\r', b'\n'])?;
+
+        headers.push(Header::new(name, value));
 
         if i.len() < 2 {
-            return Err(ParseError::Incomplete)
-        } 
+            return Err(ParseError::Incomplete);
+        }
         if &i[..2] == b"\r\n" {
             input = &i[2..];
             break;
@@ -202,45 +88,18 @@ fn parse_headers2<'a>(
     Ok(input)
 }
 
-fn find_and_skip<'a, 'b>(buf: &'a [u8], pat: &'b [u8]) -> Result<(&'a[u8], &'a [u8]), ParseError> {
-    match twoway::find_bytes(buf, pat) {
-        Some(p) => {
-            Ok((&buf[p+pat.len()..], &buf[..p]))
-        }
-        None => {
-            Err(ParseError::Incomplete)
-        }
-    }
+pub fn parse_response<'a>(buf: &'a [u8], rsp: &mut RawResponse<'a>) -> Result<usize, ParseError> {
+    let mut input = buf;
+
+    input = parse_status_line(input, rsp)?;
+
+    input = parse_headers(input, &mut rsp.headers)?;
+
+    Ok(buf.len() - input.len())
 }
 
-
-fn skip_first_crlf(input: &[u8]) -> Result<&[u8], ParseError> {
-    // skip first empty line (some clients add CRLF after POST content)
-    if input.len() < 1 {
-        return Err(ParseError::Incomplete);
-    }
-    if input[0] == b'\r' {
-        let (input, crlf) = tag(input, b"\r\n")?;
-        return Ok(input);
-    }
-
-    Ok(input)
-}
-
-fn parse_request_line<'a>(
-    input: &'a [u8],
-    req: &mut RawRequest<'a>,
-) -> Result<&'a [u8], ParseError> {
-    // get method until space
-    let (input, method) = take_until(input, |b| b == b' ')?;
-    req.method = method;
-
-    let (input, sp) = take_till(input, |b| b == b' ')?;
-
-    // get uri until space
-    let (input, uri) = take_until(input, |b| b == b' ')?;
-    let (input, sp) = take_till(input, |b| b == b' ')?;
-    req.uri = uri;
+fn parse_status_line<'a>(buf: &'a [u8], rsp: &mut RawResponse<'a>) -> Result<&'a [u8], ParseError> {
+    let input = buf;
 
     // parse version
     let (input, h) = tag(input, b"HTTP/")?;
@@ -257,43 +116,56 @@ fn parse_request_line<'a>(
     {
         return Err(ParseError::BadRequest);
     }
-    req.version = version;
+    rsp.version = version;
+    let input = &input[3..];
 
-    let (input, crlf) = tag(&input[3..], b"\r\n")?;
+    let (input, sp) = tagb(input, b' ')?;
+
+    let (input, status) = ensure_n(input, 3, is_digit)?;
+    rsp.status_code = status;
+
+    let (input, sp) = tagb(input, b' ')?;
+
+    // get reason until line end
+    let (input, reason) = find_and_skip_2bytes(input, [b'\r', b'\n'])?;
+    rsp.reason = reason;
 
     Ok(input)
 }
 
-fn parse_headers<'a>(buf: &'a [u8], headers: &mut Vec<Header<'a>>) -> Result<&'a [u8], ParseError> {
-    let mut input = buf;
-
-    loop {
-        if input.len() < 2 {
-            return Err(ParseError::Incomplete);
-        }
-        // found CRLF finished
-        if &input[..2] == b"\r\n" {
-            return Ok(&input[2..]);
-        }
-
-        // take header name before colon
-        let (i, name) = take_until(input, |b| b == b':')?;
-
-        let (i, _sp) = take_till(i, |b| b == b':' || b == b' ')?;
-
-        let (i, value) = take_until(i, |b| b == b'\r')?;
-        let value = ltrim(value);
-
-        headers.push(Header {
-            ty: HeaderType::Keep,
-            name: Cow::Borrowed(name),
-            value: Cow::Borrowed(value),
-        });
-
-        let (i, lf) = tag(i, b"\r\n")?;
-
-        input = i;
+fn find_and_skip_byte<'a, 'b>(
+    buf: &'a [u8],
+    needle: u8,
+) -> Result<(&'a [u8], &'a [u8]), ParseError> {
+    match memchr::memchr(needle, buf) {
+        Some(p) => { 
+            if p + 1 == buf.len() {
+                return Err(ParseError::Incomplete);
+            }
+            Ok((&buf[p + 1..], &buf[..p]))},
+        None => Err(ParseError::Incomplete),
     }
+}
+
+fn find_and_skip_2bytes<'a, 'b>(
+    buf: &'a [u8],
+    needle: [u8; 2],
+) -> Result<(&'a [u8], &'a [u8]), ParseError> {
+    for p in memchr::memchr_iter(needle[0], buf) {
+        if buf[p + 1] == needle[1] {
+            return Ok((&buf[p + 2..], &buf[..p]));
+        }
+    }
+
+    Err(ParseError::Incomplete)
+}
+
+fn is_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | 0x0B | 0x0C)
+}
+
+fn is_digit(b: u8) -> bool {
+    matches!(b, b'0'..=b'9')
 }
 
 fn ltrim(input: &[u8]) -> &[u8] {
@@ -316,6 +188,35 @@ fn tag<'a, 'b>(input: &'a [u8], tag: &'b [u8]) -> Result<(&'a [u8], &'a [u8]), P
     }
 
     Err(ParseError::BadRequest)
+}
+
+fn tagb(input: &[u8], tag: u8) -> Result<(&[u8], u8), ParseError> {
+    if input.len() < 1 {
+        return Err(ParseError::Incomplete);
+    }
+
+    if input[0] == tag {
+        return Ok((&input[1..], input[0]));
+    }
+
+    Err(ParseError::BadRequest)
+}
+
+fn ensure_n<F>(input: &[u8], n: usize, cond: F) -> Result<(&[u8], &[u8]), ParseError>
+where
+    F: Fn(u8) -> bool,
+{
+    if input.len() < n {
+        return Err(ParseError::Incomplete);
+    }
+
+    for b in &input[..n] {
+        if !cond(*b) {
+            return Err(ParseError::BadRequest);
+        }
+    }
+
+    return Ok((&input[n..], &input[..n]));
 }
 
 fn take_until<F>(input: &[u8], cond: F) -> Result<(&[u8], &[u8]), ParseError>
@@ -366,17 +267,34 @@ Keep-Alive: 115\r\n\
 Connection: keep-alive\r\n\
 Cookie: wp_ozh_wsa_visits=2; wp_ozh_wsa_visit_lasttime=xxxxxxxxxx; __utma=xxxxxxxxx.xxxxxxxxxx.xxxxxxxxxx.xxxxxxxxxx.xxxxxxxxxx.x; __utmz=xxxxxxxxx.xxxxxxxxxx.x.x.utmccn=(referral)|utmcsr=reader.livedoor.com|utmcct=/reader/|utmcmd=referral|padding=under256\r\n\r\n";
 
-
-
-
         let mut req = RawRequest::new();
 
-        let ret = req.parse2(buf);
+        let ret = parse_request(buf, &mut req);
 
         println!(
-            "ret: {:?}, req {:?}",
+            "body: {:?}, req {:?}",
             String::from_utf8_lossy(&buf[ret.unwrap()..]),
             &req
+        );
+    }
+
+    #[test]
+    fn test_parse_response() {
+        let buf = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: Close\r\n\r\nbad data";
+
+        let mut rsp = RawResponse::new();
+
+        let ret = parse_response(buf, &mut rsp);
+
+        println!(
+            "ret: {:?}, rsp {:?}",
+            ret, &rsp
+        );
+
+        println!(
+            "body: {:?}, req {:?}",
+            String::from_utf8_lossy(&buf[ret.unwrap()..]),
+            &rsp
         );
     }
 }
