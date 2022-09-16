@@ -1,5 +1,24 @@
 use crate::http::{Header, RawRequest, RawResponse};
 
+const BYTE_SP: u8 = b' ';
+const BYTE_COLON: u8 = b':';
+const BYTES_CRLF: [u8; 2] = [b'\r', b'\n'];
+
+// rfc9110, 5.6.2
+// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+// "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+const TCHAR_TABLE: [bool; 127] = [
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, true, false, true, true, true, true, true,
+    false, false, true, true, false, true, true, false, true, true, true, true, true, true, true,
+    true, true, true, false, false, false, false, false, false, false, true, true, true, true,
+    true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+    true, true, true, true, true, true, false, false, false, true, true, true, true, true, true,
+    true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+    true, true, true, true, true, true, true, false, true, false, true,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseStatus {
     Completed(usize),
@@ -10,7 +29,10 @@ pub enum ParseStatus {
 pub enum ParseError {
     Incomplete,
     BadRequest,
+    BadResponse,
     UnsupportMethod,
+    BadData,
+    BadHeaderName,
 }
 
 pub fn parse_request<'a>(buf: &'a [u8], req: &mut RawRequest<'a>) -> Result<usize, ParseError> {
@@ -20,58 +42,55 @@ pub fn parse_request<'a>(buf: &'a [u8], req: &mut RawRequest<'a>) -> Result<usiz
     if input.len() < 2 {
         return Err(ParseError::Incomplete);
     }
-    if &input[..2] == b"\r\n" {
+    if &input[..2] == BYTES_CRLF {
         input = &input[2..];
     }
 
-    input = parse_request_line(input, req)?;
+    let (input, line) = read_line(input)?;
 
-    input = parse_headers(input, &mut req.headers)?;
+    parse_request_line(line, req)?;
+
+    let input = parse_headers(input, &mut req.headers)?;
 
     Ok(buf.len() - input.len())
 }
 
-fn parse_request_line<'a>(buf: &'a [u8], req: &mut RawRequest<'a>) -> Result<&'a [u8], ParseError> {
-    let mut input = buf;
+fn parse_request_line<'a>(buf: &'a [u8], req: &mut RawRequest<'a>) -> Result<(), ParseError> {
+    let input = buf;
 
     // get method until space
-    let (input, method) = find_and_skip_byte(input, b' ')?;
+    let (input, method) = must_split(input, BYTE_SP)?;
     req.method = method;
 
-    let (input, uri) = find_and_skip_byte(input, b' ')?;
+    let (input, uri) = must_split(input, BYTE_SP)?;
     req.uri = uri;
 
     // parse version
-    let (input, h) = tag(input, b"HTTP/")?;
-    if input.len() < 3 {
-        return Err(ParseError::Incomplete);
-    }
+    req.version = parse_http_version(input)?;
 
-    let version = &input[..3];
-    if version[0] < 48
-        || version[0] > 57
-        || version[1] != b'.'
-        || version[2] < 48
-        || version[2] > 57
-    {
-        return Err(ParseError::BadRequest);
-    }
-    req.version = version;
-    let input = &input[3..];
-
-    let (input, crlf) = tag(input, b"\r\n")?;
-
-    Ok(input)
+    Ok(())
 }
 
 fn parse_headers<'a>(buf: &'a [u8], headers: &mut Vec<Header<'a>>) -> Result<&'a [u8], ParseError> {
     let mut input = buf;
 
     loop {
-        let (i, name) = find_and_skip_byte(input, b':')?;
-        let (i, _sp) = take_till(i, is_ws)?;
-        let (i, value) = find_and_skip_2bytes(i, [b'\r', b'\n'])?;
+        let (i, line) = read_line(input)?;
 
+        let (value, name) = must_split(line, BYTE_COLON)?;
+        // validate header name
+        for b in name {
+            if *b > 127 {
+                return Err(ParseError::BadHeaderName);
+            }
+            if !TCHAR_TABLE[*b as usize] {
+                return Err(ParseError::BadHeaderName);
+            }
+        }
+
+        // strip ows
+        let value = trim_ows(value);
+        // do not check header value
         headers.push(Header::new(name, value));
 
         if i.len() < 2 {
@@ -89,25 +108,51 @@ fn parse_headers<'a>(buf: &'a [u8], headers: &mut Vec<Header<'a>>) -> Result<&'a
 }
 
 pub fn parse_response<'a>(buf: &'a [u8], rsp: &mut RawResponse<'a>) -> Result<usize, ParseError> {
-    let mut input = buf;
+    let (input, line) = read_line(buf)?;
 
-    input = parse_status_line(input, rsp)?;
+    parse_status_line(line, rsp)?;
 
-    input = parse_headers(input, &mut rsp.headers)?;
+    let input = parse_headers(input, &mut rsp.headers)?;
 
     Ok(buf.len() - input.len())
 }
 
-fn parse_status_line<'a>(buf: &'a [u8], rsp: &mut RawResponse<'a>) -> Result<&'a [u8], ParseError> {
-    let input = buf;
+fn parse_status_line<'a>(buf: &'a [u8], rsp: &mut RawResponse<'a>) -> Result<(), ParseError> {
+    let (input, version) = must_split(buf, BYTE_SP)?;
 
-    // parse version
-    let (input, h) = tag(input, b"HTTP/")?;
-    if input.len() < 3 {
-        return Err(ParseError::Incomplete);
+    rsp.version = parse_http_version(version)?;
+
+    let (reason, code) = must_split(input, BYTE_SP)?;
+
+    if code.len() != 3 {
+        return Err(ParseError::BadResponse);
     }
 
-    let version = &input[..3];
+    for b in code {
+        if !is_digit(*b) {
+            return Err(ParseError::BadResponse);
+        }
+    }
+
+    rsp.status_code = code;
+
+    // get reason until line end
+    rsp.reason = reason;
+
+    Ok(())
+}
+
+fn parse_http_version(input: &[u8]) -> Result<&[u8], ParseError> {
+    // parse version
+    if matches!(input, b"HTTP/1.1" | b"HTTP/1.0") {
+        return Ok(&input[5..]);
+    }
+
+    if !input.starts_with(b"HTTP/") {
+        return Err(ParseError::BadRequest);
+    }
+
+    let version = &input[5..];
     if version[0] < 48
         || version[0] > 57
         || version[1] != b'.'
@@ -116,21 +161,25 @@ fn parse_status_line<'a>(buf: &'a [u8], rsp: &mut RawResponse<'a>) -> Result<&'a
     {
         return Err(ParseError::BadRequest);
     }
-    rsp.version = version;
-    let input = &input[3..];
 
-    let (input, sp) = tagb(input, b' ')?;
+    Ok(version)
+}
 
-    let (input, status) = ensure_n(input, 3, is_digit)?;
-    rsp.status_code = status;
+fn read_line(buf: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
+    for p in memchr::memchr_iter(b'\r', buf) {
+        if buf[p + 1] == b'\n' {
+            return Ok((&buf[p + 2..], &buf[..p]));
+        }
+    }
 
-    let (input, sp) = tagb(input, b' ')?;
+    Err(ParseError::Incomplete)
+}
 
-    // get reason until line end
-    let (input, reason) = find_and_skip_2bytes(input, [b'\r', b'\n'])?;
-    rsp.reason = reason;
-
-    Ok(input)
+fn must_split(buf: &[u8], pat: u8) -> Result<(&[u8], &[u8]), ParseError> {
+    match memchr::memchr(pat, buf) {
+        Some(p) => Ok((&buf[p + 1..], &buf[..p])),
+        None => Err(ParseError::BadData),
+    }
 }
 
 fn find_and_skip_byte<'a, 'b>(
@@ -138,11 +187,12 @@ fn find_and_skip_byte<'a, 'b>(
     needle: u8,
 ) -> Result<(&'a [u8], &'a [u8]), ParseError> {
     match memchr::memchr(needle, buf) {
-        Some(p) => { 
+        Some(p) => {
             if p + 1 == buf.len() {
                 return Err(ParseError::Incomplete);
             }
-            Ok((&buf[p + 1..], &buf[..p]))},
+            Ok((&buf[p + 1..], &buf[..p]))
+        }
         None => Err(ParseError::Incomplete),
     }
 }
@@ -160,17 +210,27 @@ fn find_and_skip_2bytes<'a, 'b>(
     Err(ParseError::Incomplete)
 }
 
-fn is_ws(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | 0x0B | 0x0C)
+// OWS rfc9110 5.6.3
+fn is_whitespace(b: u8) -> bool {
+    matches!(b, BYTE_SP | b'\t')
 }
 
 fn is_digit(b: u8) -> bool {
     matches!(b, b'0'..=b'9')
 }
 
-fn ltrim(input: &[u8]) -> &[u8] {
+fn trim_ows(input: &[u8]) -> &[u8] {
+    let mut input = input;
+
+    for (i, b) in input.iter().enumerate() {
+        if !is_whitespace(*b) {
+            input = &input[i..];
+            break;
+        }
+    }
+
     for (i, b) in input.iter().rev().enumerate() {
-        if *b != b' ' {
+        if !is_whitespace(*b) {
             return &input[..input.len() - i];
         }
     }
@@ -286,10 +346,7 @@ Cookie: wp_ozh_wsa_visits=2; wp_ozh_wsa_visit_lasttime=xxxxxxxxxx; __utma=xxxxxx
 
         let ret = parse_response(buf, &mut rsp);
 
-        println!(
-            "ret: {:?}, rsp {:?}",
-            ret, &rsp
-        );
+        println!("ret: {:?}, rsp {:?}", ret, &rsp);
 
         println!(
             "body: {:?}, req {:?}",
@@ -297,4 +354,21 @@ Cookie: wp_ozh_wsa_visits=2; wp_ozh_wsa_visit_lasttime=xxxxxxxxxx; __utma=xxxxxx
             &rsp
         );
     }
+
+    #[test]
+    fn print_tchar() {
+        print!("[");
+
+        for b in 0..127 {
+            if "!#$%&'*+-.^_`|~".as_bytes().contains(&b) || b.is_ascii_alphanumeric() {
+                print!("true, ")
+            } else {
+                print!("false, ")
+            }
+        }
+
+        println!("]")
+    }
 }
+
+// "!#$%&'*+-.^_`|~" / DIGIT / ALPHA
