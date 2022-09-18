@@ -1,6 +1,9 @@
-use crate::http::{Header, RawRequest, RawResponse};
+use bytes::{Bytes, BytesMut};
 
 const BYTE_SP: u8 = b' ';
+const BYTE_CR: u8 = b'\r';
+const BYTE_LF: u8 = b'\n';
+const BYTE_NUL: u8 = 0x00;
 const BYTE_COLON: u8 = b':';
 const BYTES_CRLF: [u8; 2] = [b'\r', b'\n'];
 
@@ -18,6 +21,94 @@ const TCHAR_TABLE: [bool; 127] = [
     true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
     true, true, true, true, true, true, true, false, true, false, true,
 ];
+
+const DEFAULT_HEADER_COUNT: usize = 16;
+
+pub struct Header<'a> {
+    name: &'a [u8],
+    value: &'a [u8],
+}
+
+impl<'a> Header<'a> {
+    pub fn new(name: &'a [u8], value: &'a [u8]) -> Self {
+        Header { name, value }
+    }
+}
+
+impl<'a> std::fmt::Debug for Header<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Header")
+            .field("name", &String::from_utf8_lossy(&self.name))
+            .field("value", &String::from_utf8_lossy(&self.value))
+            .finish()
+    }
+}
+
+pub struct RawRequest<'a> {
+    pub method: &'a [u8],
+    pub uri: &'a [u8],
+    pub version: &'a [u8],
+    pub headers: Vec<Header<'a>>,
+}
+
+impl<'a> RawRequest<'a> {
+    pub fn new() -> Self {
+        RawRequest {
+            method: &[],
+            uri: &[],
+            version: &[],
+            headers: Vec::with_capacity(DEFAULT_HEADER_COUNT),
+        }
+    }
+
+    pub fn headers(&self) -> &'a [Header] {
+        &self.headers
+    }
+}
+
+impl<'a> std::fmt::Debug for RawRequest<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawRequest")
+            .field("method", &String::from_utf8_lossy(self.method))
+            .field("uri", &String::from_utf8_lossy(self.uri))
+            .field("version", &String::from_utf8_lossy(self.version))
+            .field("headers", &self.headers)
+            .finish()
+    }
+}
+
+pub struct RawResponse<'a> {
+    pub status_code: &'a [u8],
+    pub reason: &'a [u8],
+    pub version: &'a [u8],
+    pub headers: Vec<Header<'a>>,
+}
+
+impl<'a> RawResponse<'a> {
+    pub fn new() -> Self {
+        RawResponse {
+            status_code: &[],
+            reason: &[],
+            version: &[],
+            headers: Vec::with_capacity(DEFAULT_HEADER_COUNT),
+        }
+    }
+
+    pub fn headers(&self) -> &'a [Header] {
+        &self.headers
+    }
+}
+
+impl<'a> std::fmt::Debug for RawResponse<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawRequest")
+            .field("status_code", &String::from_utf8_lossy(self.status_code))
+            .field("reason", &String::from_utf8_lossy(self.reason))
+            .field("version", &String::from_utf8_lossy(self.version))
+            .field("headers", &self.headers)
+            .finish()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseStatus {
@@ -77,20 +168,17 @@ fn parse_headers<'a>(buf: &'a [u8], headers: &mut Vec<Header<'a>>) -> Result<&'a
     loop {
         let (i, line) = read_line(input)?;
 
-        let (value, name) = must_split(line, BYTE_COLON)?;
-        // validate header name
-        for b in name {
-            if *b > 127 {
-                return Err(ParseError::BadHeaderName);
-            }
-            if !TCHAR_TABLE[*b as usize] {
-                return Err(ParseError::BadHeaderName);
-            }
-        }
+        let (value, name) =
+            validate_until(line, BYTE_COLON, |b| b < 127 && TCHAR_TABLE[b as usize])?;
 
-        // strip ows
+        // validate header value, reject bad data
+        // a recipient of CR, LF, or NUL within a field value 
+        // MUST either reject the message or replace each of those characters with SP 
+        // before further processing or forwarding of that message. 
+        memchr::memchr3(BYTE_CR, BYTE_LF, BYTE_NUL, value).ok_or(ParseError::BadData)?;
+
         let value = trim_ows(value);
-        // do not check header value
+
         headers.push(Header::new(name, value));
 
         if i.len() < 2 {
@@ -166,9 +254,9 @@ fn parse_http_version(input: &[u8]) -> Result<&[u8], ParseError> {
 }
 
 fn read_line(buf: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
-    for p in memchr::memchr_iter(b'\r', buf) {
-        if buf[p + 1] == b'\n' {
-            return Ok((&buf[p + 2..], &buf[..p]));
+    for p in memchr::memchr_iter(b'\n', buf) {
+        if p > 0 && buf[p - 1] == b'\r' {
+            return Ok((&buf[p + 1..], &buf[..p - 1]));
         }
     }
 
@@ -279,6 +367,22 @@ where
     return Ok((&input[n..], &input[..n]));
 }
 
+fn validate_until<F>(input: &[u8], end: u8, cond: F) -> Result<(&[u8], &[u8]), ParseError>
+where
+    F: Fn(u8) -> bool,
+{
+    for (i, b) in input.iter().enumerate() {
+        if *b == end {
+            return Ok((&input[i + 1..], &input[..i]));
+        }
+        if !cond(*b) {
+            return Err(ParseError::BadData);
+        }
+    }
+
+    Err(ParseError::Incomplete)
+}
+
 fn take_until<F>(input: &[u8], cond: F) -> Result<(&[u8], &[u8]), ParseError>
 where
     F: Fn(u8) -> bool,
@@ -356,14 +460,17 @@ Cookie: wp_ozh_wsa_visits=2; wp_ozh_wsa_visit_lasttime=xxxxxxxxxx; __utma=xxxxxx
     }
 
     #[test]
-    fn print_tchar() {
+    fn print_tchar_table() {
         print!("[");
 
         for b in 0..127 {
             if "!#$%&'*+-.^_`|~".as_bytes().contains(&b) || b.is_ascii_alphanumeric() {
-                print!("true, ")
+                print!("true, ");
             } else {
-                print!("false, ")
+                print!("false, ");
+            }
+            if b % 10 == 9 {
+                println!("");
             }
         }
 
