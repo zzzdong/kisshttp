@@ -1,8 +1,7 @@
 use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-
-use http1::http::{RawRequest, RawResponse};
+use http1::parser::{parse_request, parse_response, RawRequest, RawResponse};
 
 const REQ_SHORT: &[u8] = b"\
 GET / HTTP/1.0\r\n\
@@ -26,7 +25,10 @@ fn req(c: &mut Criterion) {
         .throughput(Throughput::Bytes(REQ.len() as u64))
         .bench_function("req", |b| {
             b.iter(|| {
-                assert_eq!(black_box(RawRequest::new().parse(REQ).unwrap()), REQ.len());
+                assert_eq!(
+                    black_box(parse_request(REQ, &mut RawRequest::new()).unwrap()),
+                    REQ.len()
+                );
             })
         });
 }
@@ -37,7 +39,7 @@ fn req_short(c: &mut Criterion) {
         .bench_function("req_short", |b| {
             b.iter(|| {
                 assert_eq!(
-                    black_box(RawRequest::new().parse(REQ_SHORT).unwrap()),
+                    black_box(parse_request(REQ_SHORT, &mut RawRequest::new()).unwrap()),
                     REQ_SHORT.len()
                 );
             })
@@ -66,17 +68,27 @@ Cookie: wp_ozh_wsa_visits=2; wp_ozh_wsa_visit_lasttime=xxxxxxxxxx; __utma=xxxxxx
 fn resp(c: &mut Criterion) {
     c.benchmark_group("resp")
         .throughput(Throughput::Bytes(RESP.len() as u64))
-        .bench_function("resp", |b| b.iter(|| {
-            assert_eq!(black_box(RawResponse::new().parse(RESP).unwrap()), RESP.len());
-        }));
+        .bench_function("resp", |b| {
+            b.iter(|| {
+                assert_eq!(
+                    black_box(parse_response(RESP, &mut RawResponse::new()).unwrap()),
+                    RESP.len()
+                );
+            })
+        }); v 
 }
 
 fn resp_short(c: &mut Criterion) {
     c.benchmark_group("resp_short")
         .throughput(Throughput::Bytes(RESP_SHORT.len() as u64))
-        .bench_function("resp_short", |b| b.iter(|| {
-            assert_eq!(black_box(RawResponse::new().parse(RESP_SHORT).unwrap()), RESP_SHORT.len());
-        }));
+        .bench_function("resp_short", |b| {
+            b.iter(|| {
+                assert_eq!(
+                    black_box(parse_response(RESP_SHORT, &mut RawResponse::new()).unwrap()),
+                    RESP_SHORT.len()
+                );
+            })
+        });
 }
 
 criterion_group! {
