@@ -75,7 +75,7 @@ fn resp(c: &mut Criterion) {
                     RESP.len()
                 );
             })
-        }); v 
+        });
 }
 
 fn resp_short(c: &mut Criterion) {
