@@ -1,3 +1,5 @@
+use core::fmt;
+
 use bytes::{Bytes, BytesMut};
 
 const BYTE_SP: u8 = b' ';
@@ -24,18 +26,18 @@ const TCHAR_TABLE: [bool; 127] = [
 
 const DEFAULT_HEADER_COUNT: usize = 16;
 
-pub struct Header<'a> {
-    name: &'a [u8],
-    value: &'a [u8],
+pub struct RawHeader<'a> {
+    pub(crate) name: &'a [u8],
+    pub(crate) value: &'a [u8],
 }
 
-impl<'a> Header<'a> {
+impl<'a> RawHeader<'a> {
     pub fn new(name: &'a [u8], value: &'a [u8]) -> Self {
-        Header { name, value }
+        RawHeader { name, value }
     }
 }
 
-impl<'a> std::fmt::Debug for Header<'a> {
+impl<'a> std::fmt::Debug for RawHeader<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Header")
             .field("name", &String::from_utf8_lossy(&self.name))
@@ -48,7 +50,7 @@ pub struct RawRequest<'a> {
     pub method: &'a [u8],
     pub uri: &'a [u8],
     pub version: &'a [u8],
-    pub headers: Vec<Header<'a>>,
+    pub headers: Vec<RawHeader<'a>>,
 }
 
 impl<'a> RawRequest<'a> {
@@ -61,7 +63,7 @@ impl<'a> RawRequest<'a> {
         }
     }
 
-    pub fn headers(&self) -> &'a [Header] {
+    pub fn headers(&self) -> &'a [RawHeader] {
         &self.headers
     }
 }
@@ -81,7 +83,7 @@ pub struct RawResponse<'a> {
     pub status_code: &'a [u8],
     pub reason: &'a [u8],
     pub version: &'a [u8],
-    pub headers: Vec<Header<'a>>,
+    pub headers: Vec<RawHeader<'a>>,
 }
 
 impl<'a> RawResponse<'a> {
@@ -94,7 +96,7 @@ impl<'a> RawResponse<'a> {
         }
     }
 
-    pub fn headers(&self) -> &'a [Header] {
+    pub fn headers(&self) -> &'a [RawHeader] {
         &self.headers
     }
 }
@@ -119,11 +121,35 @@ pub enum ParseStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {
     Incomplete,
+    TooLarge,
+    BadVersion,
     BadRequest,
     BadResponse,
     UnsupportMethod,
     BadData,
     BadHeaderName,
+    BadHeaderValue,
+
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::Incomplete => write!(f, "Incomplete"),
+            ParseError::TooLarge => write!(f, "TooLarge"),
+            ParseError::BadVersion => write!(f, "BadVersion"),
+            ParseError::BadRequest => write!(f, "BadRequest"),
+            ParseError::BadResponse => write!(f, "BadResponse"),
+            ParseError::UnsupportMethod => write!(f, "UnsupportMethod"),
+            ParseError::BadData => write!(f, "BadData"),
+            ParseError::BadHeaderName => write!(f, "BadHeaderName"),
+            ParseError::BadHeaderValue => write!(f, "BadHeaderValue"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {
+    
 }
 
 pub fn parse_request<'a>(buf: &'a [u8], req: &mut RawRequest<'a>) -> Result<usize, ParseError> {
@@ -162,7 +188,7 @@ fn parse_request_line<'a>(buf: &'a [u8], req: &mut RawRequest<'a>) -> Result<(),
     Ok(())
 }
 
-fn parse_headers<'a>(buf: &'a [u8], headers: &mut Vec<Header<'a>>) -> Result<&'a [u8], ParseError> {
+fn parse_headers<'a>(buf: &'a [u8], headers: &mut Vec<RawHeader<'a>>) -> Result<&'a [u8], ParseError> {
     let mut input = buf;
 
     loop {
@@ -175,11 +201,13 @@ fn parse_headers<'a>(buf: &'a [u8], headers: &mut Vec<Header<'a>>) -> Result<&'a
         // a recipient of CR, LF, or NUL within a field value 
         // MUST either reject the message or replace each of those characters with SP 
         // before further processing or forwarding of that message. 
-        memchr::memchr3(BYTE_CR, BYTE_LF, BYTE_NUL, value).ok_or(ParseError::BadData)?;
+        if memchr::memchr3(BYTE_CR, BYTE_LF, BYTE_NUL, value).is_some() {
+            return Err(ParseError::BadHeaderValue);
+        }
 
         let value = trim_ows(value);
 
-        headers.push(Header::new(name, value));
+        headers.push(RawHeader::new(name, value));
 
         if i.len() < 2 {
             return Err(ParseError::Incomplete);
@@ -237,7 +265,7 @@ fn parse_http_version(input: &[u8]) -> Result<&[u8], ParseError> {
     }
 
     if !input.starts_with(b"HTTP/") {
-        return Err(ParseError::BadRequest);
+        return Err(ParseError::BadVersion);
     }
 
     let version = &input[5..];
@@ -247,7 +275,7 @@ fn parse_http_version(input: &[u8]) -> Result<&[u8], ParseError> {
         || version[2] < 48
         || version[2] > 57
     {
-        return Err(ParseError::BadRequest);
+        return Err(ParseError::BadVersion);
     }
 
     Ok(version)
@@ -335,7 +363,7 @@ fn tag<'a, 'b>(input: &'a [u8], tag: &'b [u8]) -> Result<(&'a [u8], &'a [u8]), P
         return Ok((&input[tag.len()..], &input[..tag.len()]));
     }
 
-    Err(ParseError::BadRequest)
+    Err(ParseError::BadData)
 }
 
 fn tagb(input: &[u8], tag: u8) -> Result<(&[u8], u8), ParseError> {
@@ -347,7 +375,7 @@ fn tagb(input: &[u8], tag: u8) -> Result<(&[u8], u8), ParseError> {
         return Ok((&input[1..], input[0]));
     }
 
-    Err(ParseError::BadRequest)
+    Err(ParseError::BadData)
 }
 
 fn ensure_n<F>(input: &[u8], n: usize, cond: F) -> Result<(&[u8], &[u8]), ParseError>
@@ -360,7 +388,7 @@ where
 
     for b in &input[..n] {
         if !cond(*b) {
-            return Err(ParseError::BadRequest);
+            return Err(ParseError::BadData);
         }
     }
 

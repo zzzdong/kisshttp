@@ -175,7 +175,9 @@ fn parse_headers<'a>(buf: Bytes, headers: &mut Vec<Header>) -> Result<Bytes, Par
         // a recipient of CR, LF, or NUL within a field value
         // MUST either reject the message or replace each of those characters with SP
         // before further processing or forwarding of that message.
-        memchr::memchr3(BYTE_CR, BYTE_LF, BYTE_NUL, &value).ok_or(ParseError::BadData)?;
+        if memchr::memchr3(BYTE_CR, BYTE_LF, BYTE_NUL, &value).is_some() {
+            return Err(ParseError::BadData);
+        }
 
         let value = trim_ows(value);
 

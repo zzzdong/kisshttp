@@ -6,14 +6,20 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bstr = "1"
 bytes = "1"
 memchr = "2.5"
 tokio = {version="1", features=["full"]}
-
+tower = {version="0.4", features=["util"]}
 
 [dev-dependencies]
 criterion = "0.4.0"
 
 [[bench]]
 name = "parser"
+harness = false
+
+
+[[bench]]
+name = "parser2"
 harness = false
