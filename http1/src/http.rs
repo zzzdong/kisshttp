@@ -1,16 +1,22 @@
-use std::{borrow::Cow, collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt};
 
 use bstr::{BStr, BString, ByteSlice};
 
-use crate::parser::{self, ParseError, RawRequest};
+use crate::error::Error;
+use crate::parser::{ParseError, RawHeader, RawRequest};
 
 pub mod headers {
-    pub const CONTENT_LENGTH: &'static str = "Content-Length";
-    pub const TRANSFER_ENCODING: &'static str = "Transfer-Encoding";
+    use bstr::BStr;
+
+
+
+    pub const CONTENT_LENGTH: &[u8] = b"Content-Length";
+    pub const TRANSFER_ENCODING: &[u8] = b"Transfer-Encoding";
+
+    pub fn parse_header_value(value: BStr) -> Vec<BStr> {
+        value.split(b',').collect::<Vec<BStr>>()
+    }
 }
-
-
-
 
 pub enum Scheme {
     HTTP,
@@ -80,13 +86,14 @@ impl HeaderMap {
 
 impl fmt::Debug for HeaderMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map().entries(self.0.iter().map(|(ref k, ref v)| (*k, *v))).finish()
+        f.debug_map()
+            .entries(self.0.iter().map(|(ref k, ref v)| (*k, *v)))
+            .finish()
     }
 }
 
-
-impl From<parser::RawHeader<'_>> for Header {
-    fn from(header: parser::RawHeader<'_>) -> Self {
+impl From<RawHeader<'_>> for Header {
+    fn from(header: RawHeader<'_>) -> Self {
         Header::new(header.name, header.value)
     }
 }
@@ -111,7 +118,7 @@ impl Header {
 
 #[derive(Debug)]
 pub enum ContentLength {
-    Sized(usize),
+    Sized(u64),
     Chunked,
     None,
 }
@@ -126,8 +133,12 @@ pub struct Request {
     pub content_length: ContentLength,
 }
 
-impl From<RawRequest<'_>> for Request {
-    fn from(req: RawRequest<'_>) -> Self {
+impl Request {
+    // pub fn new(url: &str) -> Self {
+    //     Request { method: Method::GET, uri: (), version: (), header_map: (), content_length: () }
+    // }
+
+    pub fn from_raw_request(req: RawRequest<'_>) -> Result<Self, Error> {
         let method = match req.method {
             b"GET" => Method::GET,
             b"HEAD" => Method::HEAD,
@@ -149,19 +160,56 @@ impl From<RawRequest<'_>> for Request {
             _ => Version::V1_1,
         };
 
+        let mut content_length = ContentLength::None;
         let mut header_map = HeaderMap::new();
 
+        let mut had_transfer_encoding = false;
         for h in req.headers {
             header_map.append(h.name, h.value);
+
+            if h.name.eq_ignore_ascii_case(headers::TRANSFER_ENCODING) {
+                had_transfer_encoding = true;
+                
+
+
+            } else if h.name.eq_ignore_ascii_case(headers::CONTENT_LENGTH) {
+                if had_transfer_encoding {
+                    return Err(ParseError::BadRequest.into());
+                }
+
+                // content-length must be digit
+                for d in h.value {
+                    if !d.is_ascii_digit() {
+                        return Err(ParseError::BadRequest.into())
+                    }
+                }
+                match String::from_utf8_lossy(h.value).parse::<u64>() {
+                    Ok(len) => {
+                        content_length = ContentLength::Sized(len);
+                    }
+                    Err(_err) => {
+                        return Err(ParseError::BadRequest.into())
+                    }
+                }
+                
+            }
         }
 
-        Request {
+        Ok(Request {
             method,
             uri,
             version,
             header_map,
-            content_length: ContentLength::None,
-        }
+            content_length,
+        })
+    }
+}
+
+impl TryFrom<RawRequest<'_>> for Request {
+    type Error = Error;
+
+    fn try_from(req: RawRequest<'_>) -> Result<Self, Self::Error> {
+        Self::from_raw_request(req)
     }
 }
 

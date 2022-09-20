@@ -7,61 +7,14 @@ use std::{
 
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tower::{Service, ServiceExt};
 
-use crate::{
-    http::{Request, Response},
-    parser::{parse_request, ParseError, RawRequest},
-};
+use crate::error::{Error, ErrorKind};
+use crate::http::{Request, Response};
 
+use crate::parser::{parse_request, ParseError, RawRequest};
+                               
 const BUF_INIT_CAPACITY: usize = 4 * 1024 + 64;
 const MAX_HEADER_SIZE: usize = 4 * 1024;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ErrorKind {
-    Io,
-    Protocol,
-}
-
-pub struct Error {
-    kind: ErrorKind,
-    cause: Box<dyn std::error::Error + Send + 'static>,
-}
-
-impl Error {
-    pub fn new(kind: ErrorKind, cause: impl std::error::Error + Send + 'static) -> Self {
-        Error {
-            kind,
-            cause: Box::new(cause),
-        }
-    }
-}
-
-impl fmt::Debug for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Error")
-            .field("kind", &self.kind)
-            .field("cause", &self.cause)
-            .finish()
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Error")
-            .field("kind", &self.kind)
-            .field("cause", &self.cause)
-            .finish()
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
-        Error::new(ErrorKind::Io, err)
-    }
-}
-
-impl std::error::Error for Error {}
 
 pub struct BufferedIO<RW> {
     io: RW,
@@ -88,7 +41,7 @@ where
 
     pub fn bufferd(&self) -> &[u8] {
         &self.read_buf
-    }
+    }   
 
     pub fn bufferd_len(&self) -> usize {
         self.read_buf.len()
@@ -131,9 +84,9 @@ where
                 let mut req = RawRequest::new();
                 match parse_request(self.io.bufferd(), &mut req) {
                     Ok(parsed) => {
-                        let ret = Request::from(req);
+                        let ret = Request::try_from(req);
                         self.io.advance(parsed);
-                        return Ok(ret);
+                        return ret;
                     }
                     Err(ParseError::Incomplete) => {
                         if self.io.bufferd_len() > MAX_HEADER_SIZE {
@@ -150,7 +103,9 @@ where
 
     async fn response(&mut self, resp: Response) -> Result<(), Error> {
         self.io
-            .do_write(b"HTTP/1.1 200 Ok\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nHello")
+            .do_write(
+                b"HTTP/1.1 200 Ok\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nHello",
+            )
             .await
     }
 }

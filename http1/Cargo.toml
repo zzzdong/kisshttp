@@ -11,7 +11,6 @@ bstr = "1"
 bytes = "1"
 memchr = "2.5"
 tokio = {version="1", features=["full"]}
-tower = {version="0.4", features=["util"]}
 
 [dev-dependencies]
 criterion = "0.4.0"
