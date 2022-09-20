@@ -1,4 +1,9 @@
-use std::{convert::Infallible, fmt, future::Future, pin::Pin};
+use std::{
+    convert::Infallible,
+    fmt::{self},
+    future::Future,
+    pin::Pin,
+};
 
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -145,7 +150,7 @@ where
 
     async fn response(&mut self, resp: Response) -> Result<(), Error> {
         self.io
-            .do_write(b"HTTP/1.1 200 Ok\r\nContent-Length: 5\r\n\r\nHello")
+            .do_write(b"HTTP/1.1 200 Ok\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nHello")
             .await
     }
 }
@@ -170,37 +175,24 @@ where
     }
 }
 
+#[async_trait::async_trait]
 pub trait Handler {
     type Error: std::error::Error;
-    type Future: Future<Output = Result<Response, Self::Error>> + Send;
 
-    fn call(&mut self, req: Request) -> Self::Future;
+    async fn call(&mut self, req: Request) -> Result<Response, Self::Error>;
 }
 
-pub fn handler_fn<E, F>(f: F) -> impl Handler<Error = E>
+#[async_trait::async_trait]
+impl<E, Fut, F: Send + Sync + 'static> Handler for F
 where
     E: std::error::Error + 'static,
-    F: FnMut(Request) -> Pin<Box<dyn Future<Output = Result<Response, E>> + Send + Sync>>,
-{
-    HandlerFn { f }
-}
-
-struct HandlerFn<T> {
-    f: T,
-}
-
-impl<T, E, F> Handler for HandlerFn<T>
-where
-    E: std::error::Error,
-    T: FnMut(Request) -> F,
-    F: Future<Output = Result<Response, E>> + Send + Sync + 'static,
+    F: FnMut(Request) -> Fut,
+    Fut: Future<Output = Result<Response, E>> + Send + Sync + 'static,
 {
     type Error = E;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<Response, Self::Error>> + Send + Sync + 'static>>;
 
-    fn call(&mut self, req: Request) -> Self::Future {
-        Box::pin((self.f)(req))
+    async fn call(&mut self, req: Request) -> Result<Response, Self::Error> {
+        self(req).await
     }
 }
 
@@ -210,7 +202,7 @@ mod test {
 
     use crate::http::{Request, Response};
 
-    use super::{handler_fn, serve, Error};
+    use super::{serve, Error};
 
     #[tokio::test]
     async fn test_serve() {
@@ -220,15 +212,12 @@ mod test {
             let connection = listener.accept().await.unwrap();
 
             tokio::spawn(async move {
-                serve(
-                    connection.0,
-                    handler_fn(|req: Request| {
-                        Box::pin(async move {
-                            println!("{:?}", req);
-                            Ok::<Response, Error>(Response::new())
-                        })
-                    }),
-                )
+                serve(connection.0, |req: Request| {
+                    Box::pin(async move {
+                        // println!("{:?}", req);
+                        Ok::<Response, Error>(Response::new())
+                    })
+                })
                 .await
             });
         }

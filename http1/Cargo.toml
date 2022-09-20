@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-trait = "0.1"
 bstr = "1"
 bytes = "1"
 memchr = "2.5"
@@ -23,3 +24,6 @@ harness = false
 [[bench]]
 name = "parser2"
 harness = false
+
+[[bin]]
+name = "server"

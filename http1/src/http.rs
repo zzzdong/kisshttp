@@ -4,6 +4,14 @@ use bstr::{BStr, BString, ByteSlice};
 
 use crate::parser::{self, ParseError, RawRequest};
 
+pub mod headers {
+    pub const CONTENT_LENGTH: &'static str = "Content-Length";
+    pub const TRANSFER_ENCODING: &'static str = "Transfer-Encoding";
+}
+
+
+
+
 pub enum Scheme {
     HTTP,
     HTTPS,
@@ -102,11 +110,20 @@ impl Header {
 }
 
 #[derive(Debug)]
+pub enum ContentLength {
+    Sized(usize),
+    Chunked,
+    None,
+}
+
+#[derive(Debug)]
 pub struct Request {
     pub method: Method,
     pub uri: Uri,
     pub version: Version,
     pub header_map: HeaderMap,
+
+    pub content_length: ContentLength,
 }
 
 impl From<RawRequest<'_>> for Request {
@@ -143,6 +160,7 @@ impl From<RawRequest<'_>> for Request {
             uri,
             version,
             header_map,
+            content_length: ContentLength::None,
         }
     }
 }
