@@ -13,9 +13,7 @@ pub mod headers {
     pub const CONTENT_LENGTH: &[u8] = b"Content-Length";
     pub const TRANSFER_ENCODING: &[u8] = b"Transfer-Encoding";
 
-    pub fn parse_header_value(value: BStr) -> Vec<BStr> {
-        value.split(b',').collect::<Vec<BStr>>()
-    }
+    pub const CHUNKED: &[u8] = b"chunked";
 }
 
 pub enum Scheme {
@@ -169,9 +167,11 @@ impl Request {
 
             if h.name.eq_ignore_ascii_case(headers::TRANSFER_ENCODING) {
                 had_transfer_encoding = true;
-                
-
-
+                for part in h.value.split_str(",") {
+                    if part.trim().eq_ignore_ascii_case(headers::CHUNKED) {
+                        content_length = ContentLength::Chunked;
+                    }
+                }
             } else if h.name.eq_ignore_ascii_case(headers::CONTENT_LENGTH) {
                 if had_transfer_encoding {
                     return Err(ParseError::BadRequest.into());
@@ -191,7 +191,6 @@ impl Request {
                         return Err(ParseError::BadRequest.into())
                     }
                 }
-                
             }
         }
 

@@ -1,6 +1,6 @@
 use http1::{
     http::{Request, Response},
-    server::{serve, Error},
+    server::serve,
 };
 use tokio::net::TcpListener;
 
@@ -15,7 +15,7 @@ async fn main() {
             serve(connection.0, |req: Request| {
                 Box::pin(async move {
                     // println!("{:?}", req);
-                    Ok::<Response, Error>(Response::new())
+                    Response::new()
                 })
             })
             .await
