@@ -1,20 +1,19 @@
 use std::{collections::BTreeMap, fmt};
 
 use bstr::{BStr, BString, ByteSlice};
+use bytes::{Bytes, BytesMut, BufMut};
 
 use crate::error::Error;
 use crate::parser::{ParseError, RawHeader, RawRequest};
 
 pub mod headers {
-    use bstr::BStr;
-
-
-
     pub const CONTENT_LENGTH: &[u8] = b"Content-Length";
     pub const TRANSFER_ENCODING: &[u8] = b"Transfer-Encoding";
 
     pub const CHUNKED: &[u8] = b"chunked";
 }
+
+
 
 pub enum Scheme {
     HTTP,
@@ -223,6 +222,46 @@ impl Response {
             status_code: 200,
             header_map: HeaderMap::new(),
         }
+    }
+
+    pub fn header_buf(self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(1024);
+        
+        self.put_status_line(&mut buf);
+       
+        for (_, values) in self.header_map.0 {
+            for v in values {
+                buf.put_slice(&v.name);
+                buf.put_slice(b": ");
+                buf.put_slice(&v.value);
+                buf.put_slice(b"\r\n");
+            }
+        }
+
+        buf.put_slice(b"\r\n");
+
+        // println!("=> {:?}", String::from_utf8_lossy(&buf));
+
+        buf.freeze()
+
+    }
+
+    fn put_status_line(&self, buf : &mut BytesMut) {
+        buf.put_slice(b"HTTP/1.1 ");
+        buf.put_slice(self.status_code.to_string().as_bytes());
+        buf.put_slice(b" ");
+
+        let s: &'static [u8] = match self.status_code {
+            200 => b"OK",
+            400 => b"Bad Request",
+            404 => b"Not Found",
+            500 => b"Internal Server Error",
+            _ => unimplemented!(),
+        };
+
+        buf.put_slice(s);
+
+        buf.put_slice(b"\r\n");
     }
 }
 

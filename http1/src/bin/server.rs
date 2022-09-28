@@ -9,13 +9,16 @@ async fn main() {
     let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
 
     loop {
-        let connection = listener.accept().await.unwrap();
+        let (stream, _remote_addr) = listener.accept().await.unwrap();
 
         tokio::spawn(async move {
-            serve(connection.0, |req: Request| {
+            serve(stream, |req: Request| {
                 Box::pin(async move {
                     // println!("{:?}", req);
-                    Response::new()
+                    let mut resp = Response::new();
+                    resp.header_map.append(b"Content-Length", b"0");
+                    resp.header_map.append(b"Connection", b"keep-alive");
+                    resp
                 })
             })
             .await

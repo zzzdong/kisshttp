@@ -57,16 +57,32 @@ where
                     return Err(Error::new(ErrorKind::Protocol, err));
                 }
             }
+
+            let n = self.stream.read_buf(&mut self.buffer).await?; 
+            if n == 0 {
+                if self.buffer.len() > 8 * 1024 {
+                    return Err(ParseError::TooLarge.into());
+                }
+
+                if self.buffer.capacity() == self.buffer.len() {
+                    self.buffer.reserve(1024);
+                }
+            }
         }
     }
 
     async fn response(&mut self, resp: Response) -> Result<(), Error> {
+        let buf = resp.header_buf();
+
         self.stream
             .write_all(
-                b"HTTP/1.1 200 Ok\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nHello",
+                &buf
             )
-            .await
-            .map_err(Into::into)
+            .await?;
+
+        self.stream.flush().await?;
+
+        Ok(())
     }
 }
 
