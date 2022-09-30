@@ -66,4 +66,8 @@ impl Sender {
             .await
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "").into())
     }
+
+    pub async fn closed(&self) {
+        self.tx.closed().await
+    }
 }

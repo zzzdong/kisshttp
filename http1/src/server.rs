@@ -169,7 +169,9 @@ impl<R: AsyncRead> StreamReader<R> {
 
                 self.request_tx.send(req).await.unwrap();
 
-                self.read_request_body(&info, sender).await?;
+                if let Some(tx) = sender {
+                    self.read_request_body(&info, tx).await?;
+                }
 
                 Ok(())
             }
@@ -238,54 +240,65 @@ impl<R: AsyncRead> StreamReader<R> {
         }
     }
 
-    async fn read_request_body(
-        &mut self,
-        info: &RequestInfo,
-        tx: Option<Sender>,
-    ) -> Result<(), Error> {
+    async fn read_request_body(&mut self, info: &RequestInfo, sender: Sender) -> Result<(), Error> {
         match info.content_length {
             ContentLength::None => Ok(()),
-            ContentLength::Close => self.read_request_close_body(tx).await,
-            ContentLength::Sized(len) => self.read_request_sized_body(len, tx).await,
-            ContentLength::Chunked => self.read_request_chunked_body(tx).await,
+            ContentLength::Close => self.read_request_close_body(sender).await,
+            ContentLength::Sized(len) => self.read_request_sized_body(len, sender).await,
+            ContentLength::Chunked => self.read_request_chunked_body(sender).await,
         }
     }
 
-    async fn read_request_sized_body(
-        &mut self,
-        len: usize,
-        tx: Option<Sender>,
-    ) -> Result<(), Error> {
+    async fn read_request_sized_body(&mut self, len: usize, sender: Sender) -> Result<(), Error> {
         let mut need = len;
 
         loop {
-            if self.buffer.len() >= need {
-                let data = self.buffer.split_to(need).freeze();
+            let mut done = false;
 
-                if let Some(ref tx) = tx {
-                    tx.send(Ok(data)).await.unwrap();
-                    return Ok(());
+            let to_send = if self.buffer.len() >= need {
+                done = true;
+                self.buffer.split_to(need).freeze()
+            } else {
+                need -= self.buffer.len();
+                self.buffer.split().freeze()
+            };
+
+            select! {
+                closed = sender.closed() => {
+                    // when req.body been dropped, just drop rest body
+                    break;
+                }
+
+                _ = sender.send(Ok(to_send)) => {
+                    if done {
+                        return Ok(());
+                    }
                 }
             }
 
-            let data = self.buffer.split().freeze();
-
-            need -= data.len();
-
-            if let Some(ref tx) = tx {
-                tx.send(Ok(data)).await.unwrap();
-            }
-
-            // do read
             self.read_buf().await?;
         }
+
+        // consume request body
+        loop {
+            if self.buffer.len() >= need {
+                self.buffer.advance(need);
+                break;
+            } else {
+                self.buffer.advance(self.buffer.len());
+            };
+
+            self.read_buf().await?;
+        }
+
+        Ok(())
     }
 
-    async fn read_request_close_body(&mut self, tx: Option<Sender>) -> Result<(), Error> {
+    async fn read_request_close_body(&mut self, tx: Sender) -> Result<(), Error> {
         unimplemented!()
     }
 
-    async fn read_request_chunked_body(&mut self, tx: Option<Sender>) -> Result<(), Error> {
+    async fn read_request_chunked_body(&mut self, tx: Sender) -> Result<(), Error> {
         unimplemented!()
     }
 
