@@ -1,19 +1,20 @@
 use std::{collections::BTreeMap, fmt};
 
 use bstr::{BStr, BString, ByteSlice};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
+use crate::body::Body;
 use crate::error::Error;
 use crate::parser::{ParseError, RawHeader, RawRequest};
 
 pub mod headers {
     pub const CONTENT_LENGTH: &[u8] = b"Content-Length";
     pub const TRANSFER_ENCODING: &[u8] = b"Transfer-Encoding";
+    pub const CONNECTION: &[u8] = b"Connection";
 
     pub const CHUNKED: &[u8] = b"chunked";
+    pub const CLOSE: &[u8] = b"close";
 }
-
-
 
 pub enum Scheme {
     HTTP,
@@ -115,9 +116,22 @@ impl Header {
 
 #[derive(Debug)]
 pub enum ContentLength {
-    Sized(u64),
+    Sized(usize),
     Chunked,
     None,
+    Close,
+}
+
+#[derive(Debug)]
+pub(crate) struct RequestInfo {
+    pub content_length: ContentLength,
+    pub should_close: bool,
+}
+
+impl RequestInfo {
+    pub fn new() -> Self {
+        RequestInfo { content_length: ContentLength::None, should_close: false }
+    }
 }
 
 #[derive(Debug)]
@@ -126,8 +140,7 @@ pub struct Request {
     pub uri: Uri,
     pub version: Version,
     pub header_map: HeaderMap,
-
-    pub content_length: ContentLength,
+    pub body: Body,
 }
 
 impl Request {
@@ -135,7 +148,7 @@ impl Request {
     //     Request { method: Method::GET, uri: (), version: (), header_map: (), content_length: () }
     // }
 
-    pub fn from_raw_request(req: RawRequest<'_>) -> Result<Self, Error> {
+   pub(crate) fn from_raw_request(req: RawRequest<'_>, info: &mut RequestInfo) -> Result<Self, Error> {
         let method = match req.method {
             b"GET" => Method::GET,
             b"HEAD" => Method::HEAD,
@@ -157,6 +170,7 @@ impl Request {
             _ => Version::V1_1,
         };
 
+        let mut should_close = false;
         let mut content_length = ContentLength::None;
         let mut header_map = HeaderMap::new();
 
@@ -166,10 +180,8 @@ impl Request {
 
             if h.name.eq_ignore_ascii_case(headers::TRANSFER_ENCODING) {
                 had_transfer_encoding = true;
-                for part in h.value.split_str(",") {
-                    if part.trim().eq_ignore_ascii_case(headers::CHUNKED) {
-                        content_length = ContentLength::Chunked;
-                    }
+                if header_values_contains_token(h.value, headers::CHUNKED) {
+                    content_length = ContentLength::Chunked;
                 }
             } else if h.name.eq_ignore_ascii_case(headers::CONTENT_LENGTH) {
                 if had_transfer_encoding {
@@ -179,16 +191,19 @@ impl Request {
                 // content-length must be digit
                 for d in h.value {
                     if !d.is_ascii_digit() {
-                        return Err(ParseError::BadRequest.into())
+                        return Err(ParseError::BadRequest.into());
                     }
                 }
-                match String::from_utf8_lossy(h.value).parse::<u64>() {
+                match String::from_utf8_lossy(h.value).parse::<usize>() {
                     Ok(len) => {
-                        content_length = ContentLength::Sized(len);
+                        info.content_length = ContentLength::Sized(len);
                     }
-                    Err(_err) => {
-                        return Err(ParseError::BadRequest.into())
-                    }
+                    Err(_err) => return Err(ParseError::BadRequest.into()),
+                }
+            } else if h.name.eq_ignore_ascii_case(headers::CONNECTION) {
+                if header_values_contains_token(h.value, headers::CLOSE) {
+                    info.should_close = true;
+                    info.content_length = ContentLength::Close;
                 }
             }
         }
@@ -198,16 +213,8 @@ impl Request {
             uri,
             version,
             header_map,
-            content_length,
+            body: Body::empty(),
         })
-    }
-}
-
-impl TryFrom<RawRequest<'_>> for Request {
-    type Error = Error;
-
-    fn try_from(req: RawRequest<'_>) -> Result<Self, Self::Error> {
-        Self::from_raw_request(req)
     }
 }
 
@@ -226,9 +233,9 @@ impl Response {
 
     pub fn header_buf(self) -> Bytes {
         let mut buf = BytesMut::with_capacity(1024);
-        
+
         self.put_status_line(&mut buf);
-       
+
         for (_, values) in self.header_map.0 {
             for v in values {
                 buf.put_slice(&v.name);
@@ -243,10 +250,9 @@ impl Response {
         // println!("=> {:?}", String::from_utf8_lossy(&buf));
 
         buf.freeze()
-
     }
 
-    fn put_status_line(&self, buf : &mut BytesMut) {
+    fn put_status_line(&self, buf: &mut BytesMut) {
         buf.put_slice(b"HTTP/1.1 ");
         buf.put_slice(self.status_code.to_string().as_bytes());
         buf.put_slice(b" ");
@@ -280,6 +286,16 @@ fn title_case(s: &[u8]) -> BString {
     }
 
     ret
+}
+
+fn header_values_contains_token(values: &[u8], token: &[u8]) -> bool {
+    for part in values.split_str(",") {
+        if part.trim().eq_ignore_ascii_case(token) {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]

@@ -12,9 +12,13 @@ async fn main() {
         let (stream, _remote_addr) = listener.accept().await.unwrap();
 
         tokio::spawn(async move {
-            serve(stream, |req: Request| {
+            serve(stream, |mut req: Request| {
                 Box::pin(async move {
                     // println!("{:?}", req);
+                    // while let Ok(Some(d)) = req.body.data().await {
+                    //     println!("{:?}", String::from_utf8_lossy(&d));
+                    // }
+
                     let mut resp = Response::new();
                     resp.header_map.append(b"Content-Length", b"0");
                     resp.header_map.append(b"Connection", b"keep-alive");
